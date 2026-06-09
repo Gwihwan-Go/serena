@@ -9,7 +9,7 @@ File and file system-related tools, specifically for
 import os
 from collections import defaultdict
 from fnmatch import fnmatch
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Literal
 
 from serena.tools import SUCCESS_RESULT, EditedFileContext, Tool, ToolMarkerCanEdit, ToolMarkerOptional
@@ -141,8 +141,8 @@ class FindFileTool(Tool):
         def is_ignored_file(abs_path: str) -> bool:
             if self.project.is_ignored_path(abs_path):
                 return True
-            filename = os.path.basename(abs_path)
-            return not fnmatch(filename, file_mask)
+            rel = os.path.relpath(abs_path, self.get_project_root())
+            return not PurePath(rel).match(file_mask)
 
         _dirs, files = scan_directory(
             path=dir_to_scan,

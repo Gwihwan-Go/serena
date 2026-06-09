@@ -329,10 +329,14 @@ class ProjectConfig(SharedConfig):
                     languages_and_percentages = sorted(
                         language_composition.items(), key=lambda item: (item[1], item[0].get_priority()), reverse=True
                     )
-                    # find the language with the highest percentage and enable it
+                    # enable the top language plus any others above the auto-enable threshold
+                    _AUTO_ENABLE_THRESHOLD = 10.0  # percent
                     top_language_pair = languages_and_percentages[0]
                     other_language_pairs = languages_and_percentages[1:]
                     languages_to_use = [top_language_pair[0].value]
+                    for lang, perc in other_language_pairs:
+                        if perc >= _AUTO_ENABLE_THRESHOLD:
+                            languages_to_use.append(lang.value)
                     # if in interactive mode, ask the user which other languages to enable
                     if len(other_language_pairs) > 0 and interactive:
                         print(
