@@ -66,7 +66,7 @@ class EclipseJDTLS(SolidLanguageServer):
     You can configure the following options in ls_specific_settings (in serena_config.yml):
         - maven_user_settings: Path to Maven settings.xml file (default: ~/.m2/settings.xml)
         - gradle_user_home: Path to Gradle user home directory (default: ~/.gradle)
-        - gradle_wrapper_enabled: Whether to use the project's Gradle wrapper (default: false)
+        - gradle_wrapper_enabled: Whether to use the project's Gradle wrapper (default: auto-detect)
         - gradle_java_home: Path to JDK for Gradle (default: null, uses bundled JRE)
         - use_system_java_home: Whether to use the system's JAVA_HOME for JDTLS itself (default: false)
         - jdtls_xmx: Maximum heap size for the JDTLS server JVM (default: "3G")
@@ -498,10 +498,14 @@ class EclipseJDTLS(SolidLanguageServer):
         intellicode_xmx = self._custom_settings.get("intellicode_xmx", "1G")
         intellicode_xms = self._custom_settings.get("intellicode_xms", "100m")
 
-        # Gradle wrapper: default to False to preserve existing behaviour
-        gradle_wrapper_enabled = self._custom_settings.get("gradle_wrapper_enabled", False)
+        gradle_wrapper_config = self._custom_settings.get("gradle_wrapper_enabled")
+        has_gradle_wrapper = os.path.exists(os.path.join(repository_absolute_path, "gradlew")) or os.path.exists(
+            os.path.join(repository_absolute_path, "gradle", "wrapper", "gradle-wrapper.properties")
+        )
+        gradle_wrapper_enabled = bool(has_gradle_wrapper) if gradle_wrapper_config is None else bool(gradle_wrapper_config)
         log.info(
-            f"Gradle wrapper {'enabled' if gradle_wrapper_enabled else 'disabled'} (configurable via ls_specific_settings -> java -> gradle_wrapper_enabled)"
+            f"Gradle wrapper {'enabled' if gradle_wrapper_enabled else 'disabled'} "
+            f"(auto-detected={has_gradle_wrapper}; configurable via ls_specific_settings -> java -> gradle_wrapper_enabled)"
         )
 
         # Gradle Java home: default to None, which means the bundled JRE is used

@@ -646,7 +646,11 @@ class Project(ToStringMixin):
                 ls_specific_settings=ls_specific_settings,
                 trace_lsp_communication=self.serena_config.trace_lsp_communication,
             )
-            self.language_server_manager = LanguageServerManager.from_languages(self.project_config.languages, factory)
+            self.language_server_manager = LanguageServerManager.from_languages(
+                self.project_config.languages,
+                factory,
+                allow_partial=len(self.project_config.languages) > 1,
+            )
             return self.language_server_manager
         except Exception as e:
             self._language_server_manager_init_error = e

@@ -18,6 +18,17 @@ class LanguageServerManagerInitialisationError(Exception):
         super().__init__(message)
 
 
+def _format_language_server_startup_failure(language: Language, error: Exception) -> str:
+    message = f"{language.value}: {error}"
+    if language in (Language.PHP, Language.PHP_PHPACTOR):
+        message += (
+            "\n  php_lsp_unavailable: PHP language server failed during startup. "
+            "Check PHP runtime version, composer/vendor availability, project root/autoload setup, "
+            "and the PHP language server binary before retrying."
+        )
+    return message
+
+
 class LanguageServerFactory:
     def __init__(
         self,
@@ -67,6 +78,7 @@ class LanguageServerManager:
         self,
         language_servers: dict[Language, SolidLanguageServer],
         language_server_factory: LanguageServerFactory | None = None,
+        startup_errors: dict[Language, Exception] | None = None,
     ) -> None:
         """
         :param language_servers: a mapping from language to language server; the servers are assumed to be already started.
@@ -77,6 +89,7 @@ class LanguageServerManager:
         """
         self._language_servers = language_servers
         self._language_server_factory = language_server_factory
+        self._startup_errors = startup_errors or {}
 
     @property
     def _default_language_server(self) -> SolidLanguageServer:
@@ -85,7 +98,11 @@ class LanguageServerManager:
         return next(iter(self._language_servers.values()))
 
     @staticmethod
-    def from_languages(languages: list[Language], factory: LanguageServerFactory) -> "LanguageServerManager":
+    def from_languages(
+        languages: list[Language],
+        factory: LanguageServerFactory,
+        allow_partial: bool = False,
+    ) -> "LanguageServerManager":
         """
         Creates a manager with language servers for the given languages using the given factory.
         The language servers are started in parallel threads.
@@ -135,13 +152,16 @@ class LanguageServerManager:
         # so if any of them is not available, it is better to make symbolic tool calls fail, bringing the issue to the
         # user's attention instead of silently continuing with a subset of the language servers and potentially
         # causing suboptimal agent behaviour.
-        if exceptions:
+        if exceptions and (not allow_partial or not language_servers):
             for ls in language_servers.values():
                 ls.stop()
-            failure_messages = "\n".join([f"{lang.value}: {e}" for lang, e in exceptions.items()])
+            failure_messages = "\n".join(
+                _format_language_server_startup_failure(lang, e)
+                for lang, e in exceptions.items()
+            )
             raise LanguageServerManagerInitialisationError(f"Failed to start {len(exceptions)} language server(s):\n{failure_messages}")
 
-        return LanguageServerManager(language_servers, factory)
+        return LanguageServerManager(language_servers, factory, startup_errors=exceptions)
 
     def _ensure_functional_ls(self, ls: SolidLanguageServer) -> SolidLanguageServer:
         if not ls.is_running():
@@ -156,6 +176,12 @@ class LanguageServerManager:
                 return candidate
         return None
 
+    def _startup_error_for_path(self, relative_path: str) -> tuple[Language, Exception] | None:
+        for language, error in self._startup_errors.items():
+            if language.get_source_fn_matcher().is_relevant_filename(os.path.basename(relative_path)):
+                return language, error
+        return None
+
     def get_language_server(self, relative_path: str) -> SolidLanguageServer:
         """:param relative_path: relative path to a file"""
         ls: SolidLanguageServer | None = None
@@ -163,7 +189,22 @@ class LanguageServerManager:
             if os.path.isdir(relative_path):
                 raise ValueError(f"Expected a file path, but got a directory: {relative_path}")
             ls = self._get_suitable_language_server(relative_path)
+            if ls is None:
+                startup_error = self._startup_error_for_path(relative_path)
+                if startup_error is not None:
+                    language, error = startup_error
+                    raise LanguageServerManagerInitialisationError(
+                        "Language server unavailable for requested file:\n"
+                        + _format_language_server_startup_failure(language, error)
+                    )
         if ls is None:
+            startup_error = self._startup_error_for_path(relative_path)
+            if startup_error is not None:
+                language, error = startup_error
+                raise LanguageServerManagerInitialisationError(
+                    "Language server unavailable for requested file:\n"
+                    + _format_language_server_startup_failure(language, error)
+                )
             ls = self._default_language_server
         return self._ensure_functional_ls(ls)
 
