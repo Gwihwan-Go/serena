@@ -90,6 +90,8 @@ class LanguageServerManager:
         self._language_servers = language_servers
         self._language_server_factory = language_server_factory
         self._startup_errors = startup_errors or {}
+        self._termination_failures: dict[Language, int] = {}
+        self._circuit_open_messages: dict[Language, str] = {}
 
     @property
     def _default_language_server(self) -> SolidLanguageServer:
@@ -216,6 +218,40 @@ class LanguageServerManager:
         self._language_servers[language] = language_server
         return language_server
 
+    def record_language_server_termination(self, language: Language, *, threshold: int = 2) -> bool:
+        """
+        Records a language server termination and opens the circuit after repeated consecutive failures.
+
+        :return: True if the circuit is open for the language.
+        """
+        count = self._termination_failures.get(language, 0) + 1
+        self._termination_failures[language] = count
+        if count >= threshold:
+            self._circuit_open_messages[language] = self.format_language_server_circuit_open_message(language)
+        return self.is_language_server_circuit_open(language)
+
+    def reset_language_server_termination_failures(self, language: Language | None = None) -> None:
+        if language is None:
+            self._termination_failures.clear()
+            return
+        self._termination_failures.pop(language, None)
+
+    def is_language_server_circuit_open(self, language: Language) -> bool:
+        return language in self._circuit_open_messages
+
+    def get_open_language_server_circuit_message(self) -> str | None:
+        if not self._circuit_open_messages:
+            return None
+        return next(iter(self._circuit_open_messages.values()))
+
+    @staticmethod
+    def format_language_server_circuit_open_message(language: Language) -> str:
+        return (
+            f"language_server_unavailable: Language server for {language.value} terminated repeatedly in this project. "
+            "Semantic LSP tools are temporarily disabled for this language to avoid repeated restart failures. "
+            "Fallback: inspect files directly with read_file/search_for_pattern/find_file, or restart the bridge after fixing the language server."
+        )
+
     def restart_language_server(self, language: Language) -> SolidLanguageServer:
         """
         Forces recreation and restart of the language server for the given language.
@@ -224,6 +260,8 @@ class LanguageServerManager:
         :param language: the language
         :return: the newly created language server
         """
+        if self.is_language_server_circuit_open(language):
+            raise LanguageServerManagerInitialisationError(self.format_language_server_circuit_open_message(language))
         if language not in self._language_servers:
             raise ValueError(f"No language server for language {language.value} present; cannot restart")
         return self._create_and_start_language_server(language)

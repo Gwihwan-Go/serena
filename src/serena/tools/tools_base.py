@@ -318,16 +318,36 @@ class Tool(Component):
 
                 # apply the actual tool
                 try:
+                    ls_manager = self.agent.get_language_server_manager()
                     result = apply_fn(**kwargs)
+                    if ls_manager is not None:
+                        ls_manager.reset_language_server_termination_failures()
                 except SolidLSPException as e:
                     if e.is_language_server_terminated():
                         affected_language = e.get_affected_language()
                         if affected_language is not None:
+                            ls_manager = self.agent.get_language_server_manager_or_raise()
+                            if ls_manager.record_language_server_termination(affected_language):
+                                result = ls_manager.format_language_server_circuit_open_message(affected_language)
+                                self.agent.record_tool_usage(kwargs, result, self)
+                                return result
                             log.error(
                                 f"Language server terminated while executing tool ({e}). Restarting the language server and retrying ..."
                             )
-                            self.agent.get_language_server_manager_or_raise().restart_language_server(affected_language)
-                            result = apply_fn(**kwargs)
+                            ls_manager.restart_language_server(affected_language)
+                            try:
+                                result = apply_fn(**kwargs)
+                                ls_manager.reset_language_server_termination_failures(affected_language)
+                            except SolidLSPException as retry_error:
+                                if (
+                                    retry_error.is_language_server_terminated()
+                                    and retry_error.get_affected_language() == affected_language
+                                    and ls_manager.record_language_server_termination(affected_language)
+                                ):
+                                    result = ls_manager.format_language_server_circuit_open_message(affected_language)
+                                    self.agent.record_tool_usage(kwargs, result, self)
+                                    return result
+                                raise
                         else:
                             log.error(
                                 f"Language server terminated while executing tool ({e}), but affected language is unknown. Not retrying."
