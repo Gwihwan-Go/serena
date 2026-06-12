@@ -59,7 +59,7 @@ class Intelephense(SolidLanguageServer):
             assert is_node_installed, "node is not installed or isn't in PATH. Please install NodeJS and try again."
             is_npm_installed = shutil.which("npm") is not None
             assert is_npm_installed, "npm is not installed or isn't in PATH. Please install npm and try again."
-            intelephense_version = self._custom_settings.get("intelephense_version", "1.14.4")
+            intelephense_version = self._custom_settings.get("intelephense_version", "1.18.4")
             npm_registry = self._custom_settings.get("npm_registry")
 
             # Install intelephense if not already installed
