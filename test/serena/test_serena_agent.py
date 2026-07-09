@@ -514,16 +514,20 @@ class TestSerenaAgent:
         ],
         indirect=["serena_agent"],
     )
-    def test_non_unique_symbol_reference_error(self, serena_agent: SerenaAgent, name_path: str, relative_path: str):
+    def test_non_unique_symbol_reference_aggregation_keeps_edit_error(
+        self, serena_agent: SerenaAgent, name_path: str, relative_path: str
+    ):
         """
-        Tests whether the tools operating on a well-defined symbol raises an error when the symbol reference is non-unique.
-        We exemplarily test a retrieval tool (FindReferencingSymbolsTool) and an editing tool (ReplaceSymbolBodyTool).
+        Retrieval tools aggregate non-unique symbol references, while editing tools still reject ambiguous targets.
         """
         match_text = "multiple"
 
         find_refs_tool = serena_agent.get_tool(FindReferencingSymbolsTool)
-        with pytest.raises(ValueError, match=match_text):
-            find_refs_tool.apply(name_path=name_path, relative_path=relative_path)
+        refs_result = find_refs_tool.apply(name_path=name_path, relative_path=relative_path)
+        assert "Found multiple" not in refs_result
+        assert "fallback_reason=reference_symbol_not_found" not in refs_result
+        if not refs_result.startswith("fallback_reason=reference_zero_refs"):
+            assert json.loads(refs_result)
 
         replace_symbol_body_tool = serena_agent.get_tool(ReplaceSymbolBodyTool)
         with pytest.raises(ValueError, match=match_text):

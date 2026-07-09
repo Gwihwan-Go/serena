@@ -750,11 +750,27 @@ class LanguageServerSymbolRetriever:
     def _normalized_match_text(value: str) -> str:
         return "".join(ch.lower() for ch in value if ch.isalnum())
 
+    @staticmethod
+    def _symbol_identity_key(symbol: "LanguageServerSymbol") -> tuple[str | None, str, str, int | None, int | None]:
+        return (symbol.relative_path, symbol.get_name_path(), symbol.symbol_kind_name, symbol.line, symbol.column)
+
+    @staticmethod
+    def _symbol_summary(symbol: "LanguageServerSymbol") -> dict[str, Any]:
+        item = {
+            "name_path": symbol.get_name_path(),
+            "kind": symbol.symbol_kind_name,
+            "relative_path": symbol.relative_path,
+        }
+        if symbol.line is not None:
+            item["line"] = symbol.line + 1
+        return item
+
     def suggest_similar_symbols(
         self,
         name_path_pattern: str,
         *,
         within_relative_path: str | None = None,
+        exclude_symbols: Sequence[LanguageServerSymbol] | None = None,
         max_results: int = 8,
         min_score: float = 0.62,
     ) -> list[dict[str, Any]]:
@@ -773,6 +789,7 @@ class LanguageServerSymbolRetriever:
         if not query_norm:
             return []
 
+        excluded_keys = {self._symbol_identity_key(symbol) for symbol in exclude_symbols or []}
         scored: dict[tuple[str | None, str, str, int | None, int | None], tuple[float, dict[str, Any]]] = {}
 
         def iter_symbol_subtree(root: LanguageServerSymbol) -> Iterator[LanguageServerSymbol]:
@@ -816,14 +833,10 @@ class LanguageServerSymbolRetriever:
                         score = score_symbol(symbol)
                         if score < min_score:
                             continue
-                        item = {
-                            "name_path": symbol.get_name_path(),
-                            "kind": symbol.symbol_kind_name,
-                            "relative_path": symbol.relative_path,
-                        }
-                        if symbol.line is not None:
-                            item["line"] = symbol.line + 1
-                        key = (symbol.relative_path, item["name_path"], item["kind"], symbol.line, symbol.column)
+                        key = self._symbol_identity_key(symbol)
+                        if key in excluded_keys:
+                            continue
+                        item = self._symbol_summary(symbol)
                         previous = scored.get(key)
                         if previous is None or score > previous[0]:
                             scored[key] = (score, item)
@@ -837,6 +850,21 @@ class LanguageServerSymbolRetriever:
             ),
         )
         return [item for _score, item in ranked[:max_results]]
+
+    def find_reference_targets(
+        self,
+        name_path: str,
+        *,
+        relative_file_path: str,
+    ) -> list[LanguageServerSymbol]:
+        """Find all positionful symbols that can act as reference targets for a find_refs-style query."""
+        symbol_candidates = self.find(name_path, substring_matching=False, within_relative_path=relative_file_path)
+        symbols_by_key: dict[tuple[str | None, str, str, int | None, int | None], LanguageServerSymbol] = {}
+        for symbol in symbol_candidates:
+            if not symbol.location.has_position_in_file():
+                continue
+            symbols_by_key.setdefault(self._symbol_identity_key(symbol), symbol)
+        return list(symbols_by_key.values())
 
     def _no_symbol_match_error(self, name_path_pattern: str, within_relative_path: str | None = None) -> ValueError:
         message = f"No symbol matching '{name_path_pattern}' found"
@@ -897,28 +925,22 @@ class LanguageServerSymbolRetriever:
         exclude_kinds: Sequence[SymbolKind] | None = None,
     ) -> list[ReferenceInLanguageServerSymbol]:
         """
-        Find all symbols that reference the specified symbol, which is assumed to be unique.
+        Find all symbols that reference the specified symbol target(s).
 
         :param name_path: the name path of the symbol to find. (While this can be a matching pattern, it should
-            usually be the full path to ensure uniqueness.)
+            usually be the full path to reduce ambiguity.)
         :param relative_file_path: the relative path of the file in which the referenced symbol is defined.
         :param include_body: whether to include the body of all symbols in the result.
             Not recommended, as the referencing symbols will often be files, and thus the bodies will be very long.
         :param include_kinds: which kinds of symbols to include in the result.
         :param exclude_kinds: which kinds of symbols to exclude from the result.
         """
-        symbol_candidates = self.find(name_path, substring_matching=False, within_relative_path=relative_file_path)
-        symbols_by_key: dict[tuple[str | None, str, str, int | None, int | None], LanguageServerSymbol] = {}
-        for symbol in symbol_candidates:
-            if not symbol.location.has_position_in_file():
-                continue
-            key = (symbol.relative_path, symbol.get_name_path(), symbol.symbol_kind_name, symbol.line, symbol.column)
-            symbols_by_key.setdefault(key, symbol)
-        if not symbols_by_key:
+        symbol_candidates = self.find_reference_targets(name_path, relative_file_path=relative_file_path)
+        if not symbol_candidates:
             raise self._no_symbol_match_error(name_path, within_relative_path=relative_file_path)
 
         references_by_key: dict[tuple[str | None, str, str, int, int], ReferenceInLanguageServerSymbol] = {}
-        for symbol in symbols_by_key.values():
+        for symbol in symbol_candidates:
             for reference in self.find_referencing_symbols_by_location(
                 symbol.location, include_body=include_body, include_kinds=include_kinds, exclude_kinds=exclude_kinds
             ):

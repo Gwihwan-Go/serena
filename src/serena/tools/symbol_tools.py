@@ -243,6 +243,80 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
 
     symbol_dict_grouper = LanguageServerSymbolDictGrouper(["relative_path", "kind"], ["kind"], collapse_singleton=True)
 
+    @staticmethod
+    def _format_candidate_lines(candidates: list[dict], *, limit: int = 8) -> list[str]:
+        lines: list[str] = []
+        for candidate in candidates[:limit]:
+            name_path = candidate.get("name_path") or candidate.get("name") or "?"
+            kind = candidate.get("kind") or "?"
+            relative_path = candidate.get("relative_path") or "?"
+            line = candidate.get("line")
+            location = f"{relative_path}:L{line}" if isinstance(line, int) else str(relative_path)
+            lines.append(f"  - {name_path} ({kind}) at {location}")
+        return lines
+
+    @staticmethod
+    def _symbol_to_candidate(symbol: LanguageServerSymbol) -> dict:
+        item = {
+            "name_path": symbol.get_name_path(),
+            "kind": symbol.symbol_kind_name,
+            "relative_path": symbol.relative_path,
+        }
+        if symbol.line is not None:
+            item["line"] = symbol.line + 1
+        return item
+
+    @staticmethod
+    def _is_self_reference(ref, target: LanguageServerSymbol) -> bool:
+        target_location = target.location
+        return (
+            ref.symbol.location.relative_path == target_location.relative_path
+            and ref.line == target_location.line
+            and ref.character == target_location.column
+        )
+
+    def _format_not_found_fallback(self, name_path: str, relative_path: str, similar_symbols: list[dict]) -> str:
+        lines = [
+            "fallback_reason=reference_symbol_not_found",
+            f"Symbol {name_path!r} was not resolved under {relative_path!r}.",
+        ]
+        if similar_symbols:
+            lines.append("Similar workspace symbols:")
+            lines.extend(self._format_candidate_lines(similar_symbols))
+            lines.append(
+                "Next: retry find_refs with one candidate's exact name_path and relative_path."
+            )
+        else:
+            lines.append(
+                "No similar workspace symbols were found. Recheck spelling/case or broaden relative_path."
+            )
+        return "\n".join(lines)
+
+    def _format_zero_refs_fallback(
+        self,
+        name_path: str,
+        relative_path: str,
+        resolved_targets: list[LanguageServerSymbol],
+        broadened_candidates: list[dict],
+    ) -> str:
+        lines = [
+            "fallback_reason=reference_zero_refs",
+            f"Symbol {name_path!r} resolved under {relative_path!r}, but no usage references were reported beyond its definition.",
+            "Resolved targets:",
+        ]
+        lines.extend(self._format_candidate_lines([self._symbol_to_candidate(symbol) for symbol in resolved_targets]))
+        if broadened_candidates:
+            lines.append("Broadened candidate targets:")
+            lines.extend(self._format_candidate_lines(broadened_candidates))
+            lines.append(
+                "Next: if one candidate is the intended target, retry find_refs with that exact name_path and relative_path."
+            )
+        else:
+            lines.append(
+                "Next: treat this as no usages, or retry with a broader relative_path if the target scope was too narrow."
+            )
+        return "\n".join(lines)
+
     # noinspection PyDefaultArgument
     def apply(
         self,
@@ -270,13 +344,40 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
         parsed_exclude_kinds: Sequence[SymbolKind] | None = [SymbolKind(k) for k in exclude_kinds] if exclude_kinds else None
         symbol_retriever = self.create_language_server_symbol_retriever()
 
-        references_in_symbols = symbol_retriever.find_referencing_symbols(
-            name_path,
-            relative_file_path=relative_path,
-            include_body=include_body,
-            include_kinds=parsed_include_kinds,
-            exclude_kinds=parsed_exclude_kinds,
-        )
+        resolved_targets = symbol_retriever.find_reference_targets(name_path, relative_file_path=relative_path)
+        if not resolved_targets:
+            similar_symbols = symbol_retriever.suggest_similar_symbols(name_path, within_relative_path=relative_path)
+            return self._format_not_found_fallback(name_path, relative_path, similar_symbols)
+
+        references_by_key = {}
+        usage_reference_found = False
+        for target in resolved_targets:
+            references_for_target = symbol_retriever.find_referencing_symbols_by_location(
+                target.location,
+                include_body=include_body,
+                include_kinds=parsed_include_kinds,
+                exclude_kinds=parsed_exclude_kinds,
+            )
+            for ref in references_for_target:
+                if not self._is_self_reference(ref, target):
+                    usage_reference_found = True
+                key = (
+                    ref.symbol.location.relative_path,
+                    ref.symbol.get_name_path(),
+                    ref.symbol.symbol_kind_name,
+                    ref.line,
+                    ref.character,
+                )
+                references_by_key.setdefault(key, ref)
+        references_in_symbols = list(references_by_key.values())
+
+        if not usage_reference_found:
+            broadened_candidates = symbol_retriever.suggest_similar_symbols(
+                name_path,
+                within_relative_path=relative_path,
+                exclude_symbols=resolved_targets,
+            )
+            return self._format_zero_refs_fallback(name_path, relative_path, resolved_targets, broadened_candidates)
 
         reference_dicts = []
         for ref in references_in_symbols:
