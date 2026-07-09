@@ -5,6 +5,7 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import asdict, dataclass
+from difflib import SequenceMatcher
 from time import perf_counter
 from typing import Any, Generic, Literal, NotRequired, Self, TypedDict, TypeVar
 
@@ -745,6 +746,105 @@ class LanguageServerSymbolRetriever:
                 )
         return symbols
 
+    @staticmethod
+    def _normalized_match_text(value: str) -> str:
+        return "".join(ch.lower() for ch in value if ch.isalnum())
+
+    def suggest_similar_symbols(
+        self,
+        name_path_pattern: str,
+        *,
+        within_relative_path: str | None = None,
+        max_results: int = 8,
+        min_score: float = 0.62,
+    ) -> list[dict[str, Any]]:
+        """
+        Return likely workspace-symbol alternatives for a failed exact lookup.
+
+        Serena's normal name-path matching is intentionally exact and
+        case-sensitive. This helper is only used on misses, so it can afford to
+        scan the cached full symbol tree and rank candidates with
+        case-insensitive/fuzzy matching. The CLI index command already warms
+        document-symbol caches; request_full_symbol_tree reuses those caches.
+        """
+        query_leaf = name_path_pattern.strip(NAME_PATH_SEP).rsplit(NAME_PATH_SEP, 1)[-1]
+        query_norm = self._normalized_match_text(query_leaf)
+        query_path_norm = self._normalized_match_text(name_path_pattern)
+        if not query_norm:
+            return []
+
+        scored: dict[tuple[str | None, str, str, int | None, int | None], tuple[float, dict[str, Any]]] = {}
+
+        def iter_symbol_subtree(root: LanguageServerSymbol) -> Iterator[LanguageServerSymbol]:
+            yield root
+            for child in root.iter_children():
+                yield from iter_symbol_subtree(child)
+
+        def score_symbol(symbol: LanguageServerSymbol) -> float:
+            name_path = symbol.get_name_path()
+            name_norm = self._normalized_match_text(symbol.name)
+            path_norm = self._normalized_match_text(name_path)
+            if not name_norm and not path_norm:
+                return 0.0
+            leaf_score = SequenceMatcher(None, query_norm, name_norm).ratio() if name_norm else 0.0
+            path_score = SequenceMatcher(None, query_path_norm, path_norm).ratio() if path_norm else 0.0
+            score = max(leaf_score, path_score)
+            if query_norm == name_norm:
+                score += 0.45
+            elif query_norm and name_norm and (query_norm in name_norm or name_norm in query_norm):
+                score += 0.20
+            if query_path_norm and path_norm and query_path_norm in path_norm:
+                score += 0.10
+            return score
+
+        scopes: list[str | None] = []
+        if within_relative_path:
+            scopes.append(within_relative_path)
+        scopes.append(None)
+
+        for scope in scopes:
+            for lang_server in self._ls_manager.iter_language_servers():
+                try:
+                    symbol_roots = lang_server.request_full_symbol_tree(within_relative_path=scope)
+                except Exception as exc:  # noqa: BLE001 - best-effort suggestions
+                    log.debug("Failed to gather workspace symbols for suggestions in scope %r: %s", scope, exc)
+                    continue
+                for root in symbol_roots:
+                    for symbol in iter_symbol_subtree(LanguageServerSymbol(root)):
+                        if symbol.symbol_kind in (SymbolKind.File, SymbolKind.Package):
+                            continue
+                        score = score_symbol(symbol)
+                        if score < min_score:
+                            continue
+                        item = {
+                            "name_path": symbol.get_name_path(),
+                            "kind": symbol.symbol_kind_name,
+                            "relative_path": symbol.relative_path,
+                        }
+                        if symbol.line is not None:
+                            item["line"] = symbol.line + 1
+                        key = (symbol.relative_path, item["name_path"], item["kind"], symbol.line, symbol.column)
+                        previous = scored.get(key)
+                        if previous is None or score > previous[0]:
+                            scored[key] = (score, item)
+
+        ranked = sorted(
+            scored.values(),
+            key=lambda entry: (
+                -entry[0],
+                str(entry[1].get("relative_path") or ""),
+                str(entry[1].get("name_path") or ""),
+            ),
+        )
+        return [item for _score, item in ranked[:max_results]]
+
+    def _no_symbol_match_error(self, name_path_pattern: str, within_relative_path: str | None = None) -> ValueError:
+        message = f"No symbol matching '{name_path_pattern}' found"
+        suggestions = self.suggest_similar_symbols(name_path_pattern, within_relative_path=within_relative_path)
+        if suggestions:
+            message += ". Similar workspace symbols:\n" + json.dumps(suggestions, indent=2)
+        return ValueError(message)
+
     def find_unique(
         self,
         name_path_pattern: str,
@@ -763,7 +863,7 @@ class LanguageServerSymbolRetriever:
         if len(symbol_candidates) == 1:
             return symbol_candidates[0]
         elif len(symbol_candidates) == 0:
-            raise ValueError(f"No symbol matching '{name_path_pattern}' found")
+            raise self._no_symbol_match_error(name_path_pattern, within_relative_path=within_relative_path)
         else:
             # There are multiple candidates.
             # If only one of the candidates has the given pattern as its exact name path, return that one
@@ -807,10 +907,30 @@ class LanguageServerSymbolRetriever:
         :param include_kinds: which kinds of symbols to include in the result.
         :param exclude_kinds: which kinds of symbols to exclude from the result.
         """
-        symbol = self.find_unique(name_path, substring_matching=False, within_relative_path=relative_file_path)
-        return self.find_referencing_symbols_by_location(
-            symbol.location, include_body=include_body, include_kinds=include_kinds, exclude_kinds=exclude_kinds
-        )
+        symbol_candidates = self.find(name_path, substring_matching=False, within_relative_path=relative_file_path)
+        symbols_by_key: dict[tuple[str | None, str, str, int | None, int | None], LanguageServerSymbol] = {}
+        for symbol in symbol_candidates:
+            if not symbol.location.has_position_in_file():
+                continue
+            key = (symbol.relative_path, symbol.get_name_path(), symbol.symbol_kind_name, symbol.line, symbol.column)
+            symbols_by_key.setdefault(key, symbol)
+        if not symbols_by_key:
+            raise self._no_symbol_match_error(name_path, within_relative_path=relative_file_path)
+
+        references_by_key: dict[tuple[str | None, str, str, int, int], ReferenceInLanguageServerSymbol] = {}
+        for symbol in symbols_by_key.values():
+            for reference in self.find_referencing_symbols_by_location(
+                symbol.location, include_body=include_body, include_kinds=include_kinds, exclude_kinds=exclude_kinds
+            ):
+                key = (
+                    reference.symbol.location.relative_path,
+                    reference.symbol.get_name_path(),
+                    reference.symbol.symbol_kind_name,
+                    reference.line,
+                    reference.character,
+                )
+                references_by_key.setdefault(key, reference)
+        return list(references_by_key.values())
 
     def find_referencing_symbols_by_location(
         self,
@@ -845,7 +965,7 @@ class LanguageServerSymbolRetriever:
             line=symbol_location.line,
             column=symbol_location.column,
             include_imports=False,
-            include_self=False,
+            include_self=True,
             include_body=include_body,
             include_file_symbols=True,
         )
