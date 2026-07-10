@@ -275,6 +275,28 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
             and ref.character == target_location.column
         )
 
+    @staticmethod
+    def _parse_keyword_filter(keyword_filter: str) -> tuple[list[str], list[str]]:
+        display_keywords = [keyword.strip() for keyword in keyword_filter.split(",") if keyword.strip()]
+        match_keywords = [keyword.casefold() for keyword in display_keywords]
+        return display_keywords, match_keywords
+
+    def _reference_filter_text(self, ref) -> str:
+        try:
+            body = ref.symbol.body
+        except Exception:
+            body = None
+        if body:
+            return str(body)
+        if ref.symbol.symbol_kind_name == "File":
+            relative_path = ref.symbol.location.relative_path
+            if relative_path:
+                try:
+                    return self.project.read_file(relative_path)
+                except Exception:
+                    return ""
+        return ""
+
     def _format_not_found_fallback(self, name_path: str, similar_symbols: list[dict]) -> str:
         lines = [
             "Reference lookup fallback: target not found",
@@ -283,12 +305,23 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
         if similar_symbols:
             lines.append("Similar workspace symbols:")
             lines.extend(self._format_candidate_lines(similar_symbols))
-            lines.append(
-                "Next: retry find_refs with one candidate's exact name_path."
+            lines.extend(
+                [
+                    "",
+                    "Recommended next steps:",
+                    "  1. Use read_def on the closest similar symbol above to inspect whether it is the intended semantic target.",
+                    f"  2. If none of the similar symbols is the intended target, use bounded native search for {name_path!r} before another reference lookup.",
+                ]
             )
         else:
-            lines.append(
-                "No similar workspace symbols were found. Recheck spelling/case or locate the symbol with read_def/get_code_overview."
+            lines.extend(
+                [
+                    "No similar workspace symbols were found.",
+                    "",
+                    "Recommended next steps:",
+                    f"  1. Use bounded native search for {name_path!r} within a bounded scope from the current context.",
+                    "  2. Then call get_code_overview/read_def on the file or symbol found by that search.",
+                ]
             )
         return "\n".join(lines)
 
@@ -320,6 +353,7 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
     def apply(
         self,
         name_path: str,
+        keyword_filter: str = "",
         include_kinds: list[int] = [],  # noqa: B006
         exclude_kinds: list[int] = [],  # noqa: B006
         max_answer_chars: int = -1,
@@ -329,12 +363,15 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
         as well as a short code snippet around the reference.
 
         :param name_path: for finding the symbol to find references for, same logic as in the `find_symbol` tool.
+        :param keyword_filter: optional comma-separated plain-text keywords. If provided, only references whose containing
+            symbol body contains all keywords (case-insensitive) are returned.
         :param include_kinds: same as in the `find_symbol` tool.
         :param exclude_kinds: same as in the `find_symbol` tool.
         :param max_answer_chars: same as in the `find_symbol` tool.
         :return: a list of JSON objects with the symbols referencing the requested symbol
         """
-        include_body = False  # It is probably never a good idea to include the body of the referencing symbols
+        display_keywords, match_keywords = self._parse_keyword_filter(keyword_filter)
+        include_body = bool(match_keywords)
         parsed_include_kinds: Sequence[SymbolKind] | None = [SymbolKind(k) for k in include_kinds] if include_kinds else None
         parsed_exclude_kinds: Sequence[SymbolKind] | None = [SymbolKind(k) for k in exclude_kinds] if exclude_kinds else None
         symbol_retriever = self.create_language_server_symbol_retriever()
@@ -374,21 +411,26 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
             return self._format_zero_refs_fallback(name_path, resolved_targets, broadened_candidates)
 
         reference_dicts = []
+        filtered_references_in_symbols = []
         for ref in references_in_symbols:
-            ref_dict_orig = ref.symbol.to_dict(kind=True, relative_path=True, depth=0, body=include_body, body_location=True)
+            ref_dict_orig = ref.symbol.to_dict(kind=True, relative_path=True, depth=0, body=False, body_location=True)
             ref_dict = dict(ref_dict_orig)
-            if not include_body:
-                ref_relative_path = ref.symbol.location.relative_path
-                assert ref_relative_path is not None, f"Referencing symbol {ref.symbol.name} has no relative path, this is likely a bug."
-                content_around_ref = self.project.retrieve_content_around_line(
-                    relative_file_path=ref_relative_path, line=ref.line, context_lines_before=1, context_lines_after=1
-                )
-                ref_dict["content_around_reference"] = content_around_ref.to_display_string()
+            if match_keywords:
+                body = self._reference_filter_text(ref).casefold()
+                if not all(keyword in body for keyword in match_keywords):
+                    continue
+            ref_relative_path = ref.symbol.location.relative_path
+            assert ref_relative_path is not None, f"Referencing symbol {ref.symbol.name} has no relative path, this is likely a bug."
+            content_around_ref = self.project.retrieve_content_around_line(
+                relative_file_path=ref_relative_path, line=ref.line, context_lines_before=1, context_lines_after=1
+            )
+            ref_dict["content_around_reference"] = content_around_ref.to_display_string()
             reference_dicts.append(ref_dict)
+            filtered_references_in_symbols.append(ref)
 
         # capture lightweight reference data before grouping
         ref_summaries = []
-        for ref, d in zip(references_in_symbols, reference_dicts, strict=True):
+        for ref, d in zip(filtered_references_in_symbols, reference_dicts, strict=True):
             ref_summaries.append(
                 {
                     "name_path": d.get("name_path"),
@@ -398,7 +440,19 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
                 }
             )
 
-        result = self.symbol_dict_grouper.group(reference_dicts)  # type: ignore
+        grouped_references = self.symbol_dict_grouper.group(reference_dicts)  # type: ignore
+        result: dict | list
+        if match_keywords:
+            result = {
+                "__symcli_meta__": {
+                    "keyword_filter": display_keywords,
+                    "total_before_filter": len(references_in_symbols),
+                    "total_after_filter": len(reference_dicts),
+                },
+                "references": grouped_references,
+            }
+        else:
+            result = grouped_references
 
         # shortened result closures, from least to most aggressive shortening
         def make_refs_without_context() -> str:
