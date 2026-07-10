@@ -855,7 +855,7 @@ class LanguageServerSymbolRetriever:
         self,
         name_path: str,
         *,
-        relative_file_path: str,
+        relative_file_path: str | None = None,
     ) -> list[LanguageServerSymbol]:
         """Find all positionful symbols that can act as reference targets for a find_refs-style query."""
         symbol_candidates = self.find(name_path, substring_matching=False, within_relative_path=relative_file_path)

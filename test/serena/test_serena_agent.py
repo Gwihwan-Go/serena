@@ -243,7 +243,7 @@ class TestSerenaAgent:
 
         # Now find references
         find_refs_tool = agent.get_tool(FindReferencingSymbolsTool)
-        result = find_refs_tool.apply(name_path=def_symbol["name_path"], relative_path=def_symbol["relative_path"])
+        result = find_refs_tool.apply(name_path=def_symbol["name_path"])
 
         def contains_ref_with_relative_path(refs, relative_path):
             """
@@ -523,10 +523,11 @@ class TestSerenaAgent:
         match_text = "multiple"
 
         find_refs_tool = serena_agent.get_tool(FindReferencingSymbolsTool)
-        refs_result = find_refs_tool.apply(name_path=name_path, relative_path=relative_path)
+        refs_result = find_refs_tool.apply(name_path=name_path)
         assert "Found multiple" not in refs_result
-        assert "fallback_reason=reference_symbol_not_found" not in refs_result
-        if not refs_result.startswith("fallback_reason=reference_zero_refs"):
+        assert "Reference lookup fallback: target not found" not in refs_result
+        assert "fallback_reason=" not in refs_result
+        if not refs_result.startswith("Reference lookup fallback: no usage references"):
             assert json.loads(refs_result)
 
         replace_symbol_body_tool = serena_agent.get_tool(ReplaceSymbolBodyTool)

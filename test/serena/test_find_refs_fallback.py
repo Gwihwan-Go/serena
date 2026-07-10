@@ -57,7 +57,7 @@ class FakeRetriever:
         self.references = references
         self.suggestions = suggestions
 
-    def find_reference_targets(self, name_path: str, *, relative_file_path: str) -> list[FakeSymbol]:
+    def find_reference_targets(self, name_path: str, *, relative_file_path: str | None = None) -> list[FakeSymbol]:
         return self.targets
 
     def suggest_similar_symbols(self, name_path_pattern: str, *, within_relative_path: str | None = None, exclude_symbols=None) -> list[dict]:
@@ -105,13 +105,14 @@ def test_find_refs_not_found_returns_similar_workspace_symbols() -> None:
     }
     tool = make_tool(FakeRetriever(targets=[], references={}, suggestions=[suggestion]))
 
-    result = tool.apply(name_path="quotient", relative_path="processing/src/main/java")
+    result = tool.apply(name_path="quotient")
 
-    assert "fallback_reason=reference_symbol_not_found" in result
+    assert "Reference lookup fallback: target not found" in result
     assert "Similar workspace symbols:" in result
     assert "ArithmeticPostAggregator/Ops/QUOTIENT (EnumMember)" in result
     assert "retry find_refs" in result
     assert "Backend " + "detail" not in result
+    assert "fallback_reason=" not in result
 
 
 def test_find_refs_zero_refs_returns_distinct_broadened_candidates() -> None:
@@ -125,15 +126,16 @@ def test_find_refs_zero_refs_returns_distinct_broadened_candidates() -> None:
     self_ref = FakeReference(symbol=target, line=4, character=0)
     tool = make_tool(FakeRetriever(targets=[target], references={"pkg/widget.py": [self_ref]}, suggestions=[suggestion]))
 
-    result = tool.apply(name_path="Widget/render", relative_path="pkg/widget.py")
+    result = tool.apply(name_path="Widget/render")
 
-    assert "fallback_reason=reference_zero_refs" in result
-    assert "resolved under 'pkg/widget.py'" in result
+    assert "Reference lookup fallback: no usage references" in result
+    assert "Symbol 'Widget/render' resolved" in result
     assert "Resolved targets:" in result
     assert "Broadened candidate targets:" in result
     assert "Widget/renderAll (Method)" in result
     assert "reference_symbol_not_found" not in result
     assert "Backend " + "detail" not in result
+    assert "fallback_reason=" not in result
 
 
 def test_find_refs_multiple_targets_are_aggregated_and_deduplicated() -> None:
@@ -152,7 +154,7 @@ def test_find_refs_multiple_targets_are_aggregated_and_deduplicated() -> None:
         )
     )
 
-    result = tool.apply(name_path="useCssVars", relative_path="packages/runtime-dom/src", max_answer_chars=10000)
+    result = tool.apply(name_path="useCssVars", max_answer_chars=10000)
 
     payload = json.loads(result)
     refs = payload["packages/compiler-sfc/src/compileScript.ts"]["Function"]

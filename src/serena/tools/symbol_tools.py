@@ -275,33 +275,32 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
             and ref.character == target_location.column
         )
 
-    def _format_not_found_fallback(self, name_path: str, relative_path: str, similar_symbols: list[dict]) -> str:
+    def _format_not_found_fallback(self, name_path: str, similar_symbols: list[dict]) -> str:
         lines = [
-            "fallback_reason=reference_symbol_not_found",
-            f"Symbol {name_path!r} was not resolved under {relative_path!r}.",
+            "Reference lookup fallback: target not found",
+            f"Symbol {name_path!r} was not resolved.",
         ]
         if similar_symbols:
             lines.append("Similar workspace symbols:")
             lines.extend(self._format_candidate_lines(similar_symbols))
             lines.append(
-                "Next: retry find_refs with one candidate's exact name_path and relative_path."
+                "Next: retry find_refs with one candidate's exact name_path."
             )
         else:
             lines.append(
-                "No similar workspace symbols were found. Recheck spelling/case or broaden relative_path."
+                "No similar workspace symbols were found. Recheck spelling/case or locate the symbol with read_def/get_code_overview."
             )
         return "\n".join(lines)
 
     def _format_zero_refs_fallback(
         self,
         name_path: str,
-        relative_path: str,
         resolved_targets: list[LanguageServerSymbol],
         broadened_candidates: list[dict],
     ) -> str:
         lines = [
-            "fallback_reason=reference_zero_refs",
-            f"Symbol {name_path!r} resolved under {relative_path!r}, but no usage references were reported beyond its definition.",
+            "Reference lookup fallback: no usage references",
+            f"Symbol {name_path!r} resolved, but no usage references were reported beyond its definition.",
             "Resolved targets:",
         ]
         lines.extend(self._format_candidate_lines([self._symbol_to_candidate(symbol) for symbol in resolved_targets]))
@@ -309,11 +308,11 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
             lines.append("Broadened candidate targets:")
             lines.extend(self._format_candidate_lines(broadened_candidates))
             lines.append(
-                "Next: if one candidate is the intended target, retry find_refs with that exact name_path and relative_path."
+                "Next: if one candidate is the intended target, retry find_refs with that exact name_path."
             )
         else:
             lines.append(
-                "Next: treat this as no usages, or retry with a broader relative_path if the target scope was too narrow."
+                "Next: treat this as no usages, or verify the target with read_def/get_code_overview if the name_path may be ambiguous."
             )
         return "\n".join(lines)
 
@@ -321,7 +320,6 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
     def apply(
         self,
         name_path: str,
-        relative_path: str,
         include_kinds: list[int] = [],  # noqa: B006
         exclude_kinds: list[int] = [],  # noqa: B006
         max_answer_chars: int = -1,
@@ -331,9 +329,6 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
         as well as a short code snippet around the reference.
 
         :param name_path: for finding the symbol to find references for, same logic as in the `find_symbol` tool.
-        :param relative_path: the relative path to the file containing the symbol for which to find references.
-            Note: for external dependencies, this must be an identifier starting with `<ext` that you have received
-            earlier (don't try to guess!).
         :param include_kinds: same as in the `find_symbol` tool.
         :param exclude_kinds: same as in the `find_symbol` tool.
         :param max_answer_chars: same as in the `find_symbol` tool.
@@ -344,10 +339,10 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
         parsed_exclude_kinds: Sequence[SymbolKind] | None = [SymbolKind(k) for k in exclude_kinds] if exclude_kinds else None
         symbol_retriever = self.create_language_server_symbol_retriever()
 
-        resolved_targets = symbol_retriever.find_reference_targets(name_path, relative_file_path=relative_path)
+        resolved_targets = symbol_retriever.find_reference_targets(name_path)
         if not resolved_targets:
-            similar_symbols = symbol_retriever.suggest_similar_symbols(name_path, within_relative_path=relative_path)
-            return self._format_not_found_fallback(name_path, relative_path, similar_symbols)
+            similar_symbols = symbol_retriever.suggest_similar_symbols(name_path)
+            return self._format_not_found_fallback(name_path, similar_symbols)
 
         references_by_key = {}
         usage_reference_found = False
@@ -374,10 +369,9 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
         if not usage_reference_found:
             broadened_candidates = symbol_retriever.suggest_similar_symbols(
                 name_path,
-                within_relative_path=relative_path,
                 exclude_symbols=resolved_targets,
             )
-            return self._format_zero_refs_fallback(name_path, relative_path, resolved_targets, broadened_candidates)
+            return self._format_zero_refs_fallback(name_path, resolved_targets, broadened_candidates)
 
         reference_dicts = []
         for ref in references_in_symbols:

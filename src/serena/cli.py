@@ -960,7 +960,7 @@ class ProjectCommands(AutoRegisteringGroup):
                 # Test 3: FindReferencingSymbolsTool
                 log.info("Testing FindReferencingSymbolsTool for symbol: %s", symbol_name)
                 try:
-                    find_refs_result = agent.execute_task(lambda: find_refs_tool.apply(symbol_name, relative_path=target_file))
+                    find_refs_result = agent.execute_task(lambda: find_refs_tool.apply(symbol_name))
                     find_refs_data = json.loads(find_refs_result)
                     log.info("FindReferencingSymbolsTool found %d references for symbol %s", len(find_refs_data), symbol_name)
                 except Exception as e:
