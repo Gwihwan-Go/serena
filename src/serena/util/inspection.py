@@ -44,8 +44,23 @@ def determine_programming_language_composition(repo_path: str) -> dict[Language,
     language_counts: dict[Language, int] = {}
     total_files = len(all_files)
 
+    flow_present = os.path.exists(os.path.join(repo_path, ".flowconfig"))
     for language in Language.iter_all(include_experimental=False):
+        if language == Language.JAVASCRIPT_FLOW and not flow_present:
+            # Flow only participates when the repo actually uses Flow.
+            continue
         matcher = language.get_source_fn_matcher()
+        if flow_present and language in (Language.TYPESCRIPT, Language.TYPESCRIPT_VTS, Language.VUE):
+            # With a .flowconfig present, *.js belongs to the Flow server —
+            # neither tsserver nor the Vue LS can parse Flow syntax. Count the
+            # JS-superset languages by their own file families only, so Flow
+            # outranks them in the language ordering (per-file routing picks
+            # the first matching server in that order).
+            from solidlsp.ls_config import FilenameMatcher as _FM
+            if language == Language.VUE:
+                matcher = _FM("*.vue")
+            else:
+                matcher = _FM("*.ts", "*.tsx", "*.mts", "*.cts")
         count = 0
 
         for file_path in all_files:

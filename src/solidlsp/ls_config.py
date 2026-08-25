@@ -96,6 +96,10 @@ class Language(str, Enum):
     """
     # Experimental or deprecated Language Servers
     TYPESCRIPT_VTS = "typescript_vts"
+    JAVASCRIPT_FLOW = "javascript_flow"
+    """Flow-typed JavaScript via `flow lsp` (flow-bin). Only auto-detected when
+    the repository root has a .flowconfig; routes *.js files that
+    typescript-language-server cannot parse (Flow syntax)."""
     """Use the typescript language server through the natively bundled vscode extension via https://github.com/yioneko/vtsls"""
     PYTHON_JEDI = "python_jedi"
     """Jedi language server for Python (instead of pyright, which is the default)"""
@@ -206,6 +210,8 @@ class Language(str, Enum):
                 return FilenameMatcher("*.py", "*.pyi")
             case self.JAVA:
                 return FilenameMatcher("*.java")
+            case self.JAVASCRIPT_FLOW:
+                return FilenameMatcher("*.js", "*.jsx", "*.mjs", "*.cjs")
             case self.TYPESCRIPT | self.TYPESCRIPT_VTS:
                 # see https://github.com/oraios/serena/issues/204
                 path_patterns = []
@@ -366,6 +372,10 @@ class Language(str, Enum):
                 from solidlsp.language_servers.omnisharp import OmniSharp
 
                 return OmniSharp
+            case self.JAVASCRIPT_FLOW:
+                from solidlsp.language_servers.flow_language_server import FlowLanguageServer
+
+                return FlowLanguageServer
             case self.TYPESCRIPT:
                 from solidlsp.language_servers.typescript_language_server import TypeScriptLanguageServer
 
