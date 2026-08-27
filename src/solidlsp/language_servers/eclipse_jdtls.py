@@ -930,7 +930,64 @@ class EclipseJDTLS(SolidLanguageServer):
         else:
             log.info("Project is ready")
 
+        self._clamp_legacy_compiler_compliance()
         log.info("Startup complete")
+
+    def _clamp_legacy_compiler_compliance(self) -> None:
+        """T-774: JDT on a modern bundled JDK cannot resolve JRE type bindings
+        for projects imported at compiler compliance < 1.8 (e.g. Maven
+        ``<release>7</release>`` — JDK 21's ct.sym carries no release-7 data).
+        The project still compiles cleanly and definitions resolve, but the
+        search engine classifies every match whose signature involves a
+        java.* type (String, Date, ...) as potential-only and reports ZERO
+        references, project-wide and silently. Clamp such projects to 1.8 via
+        jdt.ls project settings — repository files are never touched.
+        Disable with SERENA_JDTLS_MIN_COMPLIANCE=off (or set another floor).
+        """
+        floor = os.environ.get("SERENA_JDTLS_MIN_COMPLIANCE", "1.8").strip()
+        if floor.lower() in ("0", "off", "false", ""):
+            return
+        keys = [
+            "org.eclipse.jdt.core.compiler.compliance",
+            "org.eclipse.jdt.core.compiler.source",
+            "org.eclipse.jdt.core.compiler.codegen.targetPlatform",
+        ]
+
+        def _level(value: object) -> float | None:
+            try:
+                return float(str(value))
+            except (TypeError, ValueError):
+                return None
+
+        floor_num = _level(floor)
+        if floor_num is None:
+            log.warning("SERENA_JDTLS_MIN_COMPLIANCE=%r is not a compliance level; skipping clamp", floor)
+            return
+        try:
+            projects = self.server.send.execute_command({"command": "java.project.getAll", "arguments": []}) or []
+            if isinstance(projects, dict):
+                projects = projects.get("data") or []
+            for uri in projects:
+                try:
+                    settings = (
+                        self.server.send.execute_command({"command": "java.project.getSettings", "arguments": [uri, keys]}) or {}
+                    )
+                    level = _level(settings.get(keys[0]))
+                    if level is not None and level < floor_num:
+                        self.server.send.execute_command(
+                            {"command": "java.project.updateSettings", "arguments": [uri, {k: floor for k in keys}]}
+                        )
+                        log.info(
+                            "Clamped compiler compliance %s -> %s for %s (reference search silently returns "
+                            "zero results for JRE-typed signatures below 1.8)",
+                            settings.get(keys[0]),
+                            floor,
+                            uri,
+                        )
+                except Exception as e:
+                    log.warning("Compliance clamp failed for %s: %s", uri, e)
+        except Exception as e:
+            log.warning("Compliance clamp skipped: %s", e)
 
     @override
     def _request_hover(self, file_buffer: LSPFileBuffer, line: int, column: int) -> ls_types.Hover | None:
