@@ -345,7 +345,9 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
             )
         else:
             lines.append(
-                "Next: treat this as no usages, or verify the target with read_def/get_code_overview if the name_path may be ambiguous."
+                "Next: language servers can under-report references for some files, so treat this as "
+                "'none reported', not proof of zero callers — confirm with one bounded text search "
+                "for the symbol name before concluding nothing depends on it."
             )
         return "\n".join(lines)
 
