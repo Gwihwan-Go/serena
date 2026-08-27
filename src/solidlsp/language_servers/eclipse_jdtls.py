@@ -903,17 +903,27 @@ class EclipseJDTLS(SolidLanguageServer):
 
         self.server.notify.workspace_did_change_configuration({"settings": initialize_params["initializationOptions"]["settings"]})  # type: ignore
 
-        self._intellicode_enable_command_available.wait()
+        # T-778: IntelliCode enable is completion ranking — unused by symcli
+        # (no completion requests are ever issued) — and the
+        # java.intellicode.enable executeCommand can hang behind jdt.ls
+        # workspace jobs during a large Gradle import (lucene-12626: no
+        # response for 895s, which failed the entire LS startup while
+        # ProjectStatus/ServiceReady had long been OK). Skip it by default;
+        # SERENA_JDTLS_ENABLE_INTELLICODE=1 restores the upstream behavior.
+        if os.environ.get("SERENA_JDTLS_ENABLE_INTELLICODE", "").strip().lower() in ("1", "true", "on"):
+            self._intellicode_enable_command_available.wait()
 
-        java_intellisense_members_path = self.runtime_dependency_paths.intellisense_members_path
-        assert os.path.exists(java_intellisense_members_path)
-        intellicode_enable_result = self.server.send.execute_command(
-            {
-                "command": "java.intellicode.enable",
-                "arguments": [True, java_intellisense_members_path],
-            }
-        )
-        assert intellicode_enable_result
+            java_intellisense_members_path = self.runtime_dependency_paths.intellisense_members_path
+            assert os.path.exists(java_intellisense_members_path)
+            intellicode_enable_result = self.server.send.execute_command(
+                {
+                    "command": "java.intellicode.enable",
+                    "arguments": [True, java_intellisense_members_path],
+                }
+            )
+            assert intellicode_enable_result
+        else:
+            log.info("Skipping IntelliCode enable (symcli issues no completion requests; the enable command can hang jdt.ls startup on large Gradle imports)")
 
         if not self._service_ready_event.is_set():
             log.info("Waiting for service to be ready ...")
