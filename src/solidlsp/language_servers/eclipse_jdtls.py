@@ -930,8 +930,23 @@ class EclipseJDTLS(SolidLanguageServer):
         else:
             log.info("Project is ready")
 
-        self._clamp_legacy_compiler_compliance()
+        # T-778: run the compliance clamp on a background thread. Its
+        # executeCommand round-trips block while jdt.ls is still importing a
+        # large workspace (lucene), and doing that inline would stretch the
+        # startup sequence toward the request timeout that marks the whole
+        # LS failed. The thread waits for the project-ready event (which the
+        # inline wait above may have given up on) and clamps once ready.
+        threading.Thread(target=self._clamp_when_project_ready, daemon=True).start()
         log.info("Startup complete")
+
+    def _clamp_when_project_ready(self) -> None:
+        try:
+            if not self._project_ready_event.wait(timeout=float(os.environ.get("SERENA_JDTLS_CLAMP_READY_TIMEOUT", "900"))):
+                log.warning("Compliance clamp skipped: project never reported ready")
+                return
+            self._clamp_legacy_compiler_compliance()
+        except Exception as e:
+            log.warning("Compliance clamp thread failed: %s", e)
 
     def _clamp_legacy_compiler_compliance(self) -> None:
         """T-774: JDT on a modern bundled JDK cannot resolve JRE type bindings
