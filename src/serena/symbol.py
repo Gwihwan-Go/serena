@@ -482,6 +482,12 @@ class LanguageServerSymbol(Symbol, ToStringMixin):
 
         if kind:
             result["kind"] = self.symbol_kind_name
+            # T-913: pass through the language server's own signature text
+            # (LSP DocumentSymbol.detail — rust-analyzer/gopls/etc. put the
+            # declaration here). Additive: only emitted when the LS set it.
+            detail = self.symbol_root.get("detail")
+            if isinstance(detail, str) and detail.strip():
+                result["detail"] = detail.strip()
 
         if location:
             result["location"] = self.location.to_dict(include_relative_path=relative_path)
