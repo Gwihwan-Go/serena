@@ -38,6 +38,7 @@ from ..analytics import RegisteredTokenCountEstimator
 from ..util.class_decorators import singleton
 from ..util.cli_util import ask_yes_no
 from ..util.dataclass import get_dataclass_default
+from filelock import FileLock
 
 if TYPE_CHECKING:
     from ..project import Project
@@ -788,7 +789,14 @@ class SerenaConfig(SharedConfig):
         """
         log.info(f"Auto-generating Serena configuration file in {config_file_path}")
         loaded_commented_yaml = load_yaml(SERENA_CONFIG_TEMPLATE_FILE)
-        save_yaml(config_file_path, loaded_commented_yaml)
+        # Written atomically: several Serena processes can bootstrap the same
+        # user home concurrently, and a direct write lets another process read
+        # a truncated file - which surfaces as the confusing
+        # "`projects` key not found in Serena configuration" instead of a
+        # parse error.
+        tmp_path = f"{config_file_path}.{os.getpid()}.tmp"
+        save_yaml(tmp_path, loaded_commented_yaml)
+        os.replace(tmp_path, config_file_path)
 
     @classmethod
     def _determine_config_file_path(cls) -> str:
@@ -819,7 +827,10 @@ class SerenaConfig(SharedConfig):
             if not generate_if_missing:
                 raise FileNotFoundError(f"Serena configuration file not found: {config_file_path}")
             log.info(f"Serena configuration file not found at {config_file_path}, autogenerating...")
-            cls._generate_config_file(config_file_path)
+            os.makedirs(os.path.dirname(config_file_path) or ".", exist_ok=True)
+            with FileLock(f"{config_file_path}.lock", timeout=120):
+                if not os.path.exists(config_file_path):  # re-check under the lock
+                    cls._generate_config_file(config_file_path)
 
         # load the configuration
         log.info(f"Loading Serena configuration from {config_file_path}")
