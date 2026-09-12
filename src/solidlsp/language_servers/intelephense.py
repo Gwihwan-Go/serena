@@ -18,6 +18,7 @@ from solidlsp.settings import SolidLSPSettings
 
 from ..lsp_protocol_handler import lsp_types
 from .common import RuntimeDependency, RuntimeDependencyCollection, build_npm_install_command
+from filelock import FileLock
 
 log = logging.getLogger(__name__)
 
@@ -66,17 +67,23 @@ class Intelephense(SolidLanguageServer):
             intelephense_ls_dir = os.path.join(self._ls_resources_dir, "php-lsp")
             os.makedirs(intelephense_ls_dir, exist_ok=True)
             intelephense_executable_path = os.path.join(intelephense_ls_dir, "node_modules", ".bin", "intelephense")
-            if not os.path.exists(intelephense_executable_path):
-                deps = RuntimeDependencyCollection(
-                    [
-                        RuntimeDependency(
-                            id="intelephense",
-                            command=build_npm_install_command("intelephense", intelephense_version, npm_registry),
-                            platform_id="any",
-                        )
-                    ]
-                )
-                deps.install(intelephense_ls_dir)
+            # Locked: the check-then-install below is shared between Serena
+            # processes using the same resources dir, and concurrent npm
+            # installs into one node_modules tree corrupt each other (same
+            # shape as the jdtls install race, T-1112). Only the first, cold
+            # install blocks.
+            with FileLock(os.path.join(intelephense_ls_dir, ".install.lock"), timeout=1800):
+                if not os.path.exists(intelephense_executable_path):
+                    deps = RuntimeDependencyCollection(
+                        [
+                            RuntimeDependency(
+                                id="intelephense",
+                                command=build_npm_install_command("intelephense", intelephense_version, npm_registry),
+                                platform_id="any",
+                            )
+                        ]
+                    )
+                    deps.install(intelephense_ls_dir)
 
             assert os.path.exists(intelephense_executable_path), (
                 f"intelephense executable not found at {intelephense_executable_path}, something went wrong."

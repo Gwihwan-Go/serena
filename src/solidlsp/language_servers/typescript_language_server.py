@@ -20,6 +20,7 @@ from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.settings import SolidLSPSettings
 
 from .common import RuntimeDependency, RuntimeDependencyCollection, build_npm_install_command
+from filelock import FileLock
 
 log = logging.getLogger(__name__)
 
@@ -182,31 +183,42 @@ class TypeScriptLanguageServer(SolidLanguageServer):
             version_file = os.path.join(tsserver_ls_dir, ".installed_version")
             expected_version = f"{typescript_version}_{typescript_language_server_version}"
 
-            needs_install = False
-            if not os.path.exists(tsserver_executable_path):
-                log.info(f"Typescript Language Server executable not found at {tsserver_executable_path}.")
-                needs_install = True
-            elif os.path.exists(version_file):
-                with open(version_file) as f:
-                    installed_version = f.read().strip()
-                if installed_version != expected_version:
-                    log.info(
-                        f"TypeScript Language Server version mismatch: installed={installed_version}, expected={expected_version}. Reinstalling..."
-                    )
+            # Locked for the same reason as intelephense/jdtls (T-1112): the
+            # version check and the npm install below race between processes
+            # sharing this resources dir. Held across the check so a waiter
+            # re-evaluates after the installer finished.
+            os.makedirs(tsserver_ls_dir, exist_ok=True)
+            install_lock = FileLock(os.path.join(tsserver_ls_dir, ".install.lock"), timeout=1800)
+            install_lock.acquire()
+            try:
+                needs_install = False
+                if not os.path.exists(tsserver_executable_path):
+                    log.info(f"Typescript Language Server executable not found at {tsserver_executable_path}.")
                     needs_install = True
-            else:
-                # No version file exists, assume old installation needs refresh
-                log.info("TypeScript Language Server version file not found. Reinstalling to ensure correct version...")
-                needs_install = True
+                elif os.path.exists(version_file):
+                    with open(version_file) as f:
+                        installed_version = f.read().strip()
+                    if installed_version != expected_version:
+                        log.info(
+                            f"TypeScript Language Server version mismatch: installed={installed_version}, expected={expected_version}. Reinstalling..."
+                        )
+                        needs_install = True
+                else:
+                    # No version file exists, assume old installation needs refresh
+                    log.info("TypeScript Language Server version file not found. Reinstalling to ensure correct version...")
+                    needs_install = True
 
-            if needs_install:
-                log.info("Installing TypeScript Language Server dependencies...")
-                with LogTime("Installation of TypeScript language server dependencies", logger=log):
-                    deps.install(tsserver_ls_dir)
-                # Write version marker file
-                with open(version_file, "w") as f:
-                    f.write(expected_version)
-                log.info("TypeScript language server dependencies installed successfully")
+                if needs_install:
+                    log.info("Installing TypeScript Language Server dependencies...")
+                    with LogTime("Installation of TypeScript language server dependencies", logger=log):
+                        deps.install(tsserver_ls_dir)
+                    # Write version marker file
+                    with open(version_file, "w") as f:
+                        f.write(expected_version)
+                    log.info("TypeScript language server dependencies installed successfully")
+
+            finally:
+                install_lock.release()
 
             if not os.path.exists(tsserver_executable_path):
                 raise FileNotFoundError(
