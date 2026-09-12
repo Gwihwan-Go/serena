@@ -13,6 +13,7 @@ from pathlib import PurePath
 from time import sleep
 from typing import cast
 
+from filelock import FileLock
 from overrides import override
 
 from solidlsp import ls_types
@@ -148,13 +149,40 @@ class EclipseJDTLS(SolidLanguageServer):
             self._repository_root_path = repository_root_path
             self.runtime_dependency_paths = self._setup_runtime_dependencies(ls_resources_dir, custom_settings)
 
+        #: how long a process waits for another one to finish installing the
+        #: Java runtime dependencies before giving up (a cold install of
+        #: gradle + vscode-java + intellicode measures 2-3 minutes)
+        INSTALL_LOCK_TIMEOUT_S = 1800
+
         @staticmethod
         def _setup_runtime_dependencies(
             ls_resources_dir: str, custom_settings: SolidLSPSettings.CustomLSSettings
         ) -> RuntimeDependencyPaths:
             """
             Setup runtime dependencies for EclipseJDTLS and return the paths.
+
+            Serialized across processes: the installation below is a
+            check-then-act sequence (``if not exists: download+extract``) that
+            writes into a resources directory several Serena processes can
+            share. Without the lock, concurrent starts extract the same
+            archives into the same tree at the same time, which fails with
+            "Error extracting archive", and a half-written tree also lets a
+            second process pass the existence checks and then start a jdtls
+            that is missing files ("language server manager is not
+            initialized"). Only the first, cold install actually blocks;
+            afterwards every process takes the lock and immediately finds the
+            dependencies in place.
             """
+            os.makedirs(ls_resources_dir, exist_ok=True)
+            lock_path = str(PurePath(ls_resources_dir, ".install.lock"))
+            with FileLock(lock_path, timeout=EclipseJDTLS.DependencyProvider.INSTALL_LOCK_TIMEOUT_S):
+                return EclipseJDTLS.DependencyProvider._setup_runtime_dependencies_locked(ls_resources_dir, custom_settings)
+
+        @staticmethod
+        def _setup_runtime_dependencies_locked(
+            ls_resources_dir: str, custom_settings: SolidLSPSettings.CustomLSSettings
+        ) -> RuntimeDependencyPaths:
+            """Install body; callers must hold the resources-dir install lock."""
             platformId = PlatformUtils.get_platform_id()
             gradle_version = custom_settings.get("gradle_version", "8.14.2")
             vscode_java_version = custom_settings.get("vscode_java_version", "1.42.0-561")
