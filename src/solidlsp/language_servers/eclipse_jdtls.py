@@ -960,7 +960,7 @@ class EclipseJDTLS(SolidLanguageServer):
 
         if not self._project_ready_event.is_set():
             log.info("Waiting for project to be ready ...")
-            project_ready_timeout = 20  # Hotfix: Using timeout until we figure out why sometimes we don't get the project ready event
+            project_ready_timeout = 120  # Hotfix: Using timeout until we figure out why sometimes we don't get the project ready event; 120s because large Gradle multi-module imports (lucene) need 60-90s before the project-ready event fires
             if self._project_ready_event.wait(timeout=project_ready_timeout):
                 log.info("Project is ready")
             else:
